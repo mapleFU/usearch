@@ -1006,6 +1006,51 @@ template <std::size_t alignment_ak = 1> class memory_mapping_allocator_gt {
      *  @warning The very first memory de-allocation discards all the arenas!
      */
     void deallocate(byte_t* = nullptr, std::size_t = 0) noexcept { reset(); }
+
+    /**
+     *  @brief Freezes the allocator by releasing excess memory in the last arena.
+     *  @note This should only be called when you are certain no more allocations will be made.
+     *  @return True if the operation was successful, false otherwise.
+     */
+    bool freeze() noexcept {
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (!last_arena_)
+            return true; // Nothing to freeze
+
+        // Calculate the optimal size for the last arena
+        std::size_t optimal_size = divide_round_up<alignment_ak>(last_usage_) * alignment_ak;
+        // Round up to page size
+        optimal_size = divide_round_up(optimal_size, page_allocator_t::page_size()) * page_allocator_t::page_size();
+
+        // If the current capacity is already optimal, no need to resize
+        if (optimal_size >= last_capacity_ || optimal_size < head_size())
+            return true;
+
+        // Allocate a new arena with the optimal size
+        byte_t* new_arena = page_allocator_t{}.allocate(optimal_size);
+        if (!new_arena)
+            return false;
+
+        // Copy the header information (pointer to previous arena)
+        byte_t* previous_arena = nullptr;
+        std::memcpy(&previous_arena, last_arena_, sizeof(byte_t*));
+        
+        // Copy all content at once (including header and data)
+        std::memcpy(new_arena, last_arena_, last_usage_);
+        
+        // Update the size information in the header
+        std::memcpy(new_arena + sizeof(byte_t*), &optimal_size, sizeof(std::size_t));
+
+        // Deallocate the old arena
+        page_allocator_t{}.deallocate(last_arena_, last_capacity_);
+
+        // Update the allocator state
+        wasted_space_ -= (last_capacity_ - last_usage_);
+        last_arena_ = new_arena;
+        last_capacity_ = optimal_size;
+
+        return true;
+    }
 };
 
 using memory_mapping_allocator_t = memory_mapping_allocator_gt<>;
